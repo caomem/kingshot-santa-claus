@@ -237,7 +237,40 @@ Exit codes: `0` normal, `1` nothing to redeem, `75` throttled and abandoned,
 
 ## Signing salt
 
-Requests are signed with `md5(sorted_query + SIGN_SALT)`. The salt lives in the
-site's JS bundle (`js/src_pages_home_index_vue.*.js`) and changes when the
-frontend is rebuilt. If every call starts failing on the signature, re-extract
-it and update `SIGN_SALT` in `santaclaus.py`.
+Requests are signed with `md5(sorted_query + salt)`. The salt is a literal in
+the site's JS bundle and changes whenever the frontend is rebuilt, at which
+point the API answers `Sign Error` to everything.
+
+**This is handled automatically.** The first rejected signature in a run stops
+the run in place, rediscovers the salt from the live site, caches it, and
+retries the attempt that failed. Nothing is lost and no configuration changes.
+
+Discovery starts from the site URL alone — nothing about filenames or build
+hashes is hardcoded:
+
+1. read the page, take the `<script>` sources
+2. read `app.js` for the lazy chunk's name; its build hash is the one `app.js`
+   itself carries, with the other hashes in the file as fallbacks
+3. collect every short opaque string literal across all bundles
+4. probe each against `/api/gift_code_config`, which takes only a timestamp,
+   touches no player and changes nothing, until one signs correctly
+
+On the current build that is 42 candidates, the right one found eighth, in
+about nine seconds. Symbol-bearing candidates are tried first because salts
+tend to carry punctuation and identifiers do not — but the whole list is
+probed, so an alphanumeric replacement is still found.
+
+The result is cached in `logs/salt` (override with `SANTACLAUS_SALT_CACHE`),
+which takes precedence over the `SIGN_SALT` constant. `make clean` and
+`make purge` both leave it alone.
+
+To check or refresh it by hand:
+
+```bash
+santaclaus.py --update-salt
+```
+
+It exits `0` without probing when the current salt still works. If discovery
+fails — the site is unreachable, or the bundle layout changed beyond
+recognition — the run aborts on the **first** request rather than sending the
+whole roster into a wall, and exits `1`.

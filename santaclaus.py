@@ -1,4 +1,5 @@
 import argparse
+import codecs
 import csv
 import hashlib
 import html
@@ -10,16 +11,52 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from datetime import datetime, timezone
 
 # Backend used by https://ks-giftcode.centurygame.com/ (the public gift code page).
 API_BASE = "https://kingshot-giftcode.centurygame.com/api"
 ORIGIN = "https://ks-giftcode.centurygame.com"
 
-# Every request is signed with md5(sorted_query + SIGN_SALT). The salt is baked
-# into the site's JS bundle and changes whenever the frontend is rebuilt; if the
-# API starts answering "sign error", re-extract it from js/src_pages_home_index_vue.*.js
+# Every request is signed with md5(sorted_query + salt). The salt is baked into
+# the site's JS bundle and changes whenever the frontend is rebuilt. This is the
+# last known value; discover_salt() finds the new one from the live bundle, and
+# a discovered salt is cached so later runs start with it.
 SIGN_SALT = "mN4!pQs6JrYwV9"
+
+SITE_ROOT = "https://ks-giftcode.centurygame.com/"
+SALT_CACHE = os.environ.get("SANTACLAUS_SALT_CACHE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "logs", "salt"
+)
+
+# What the API says when the signature does not check out.
+SIGN_ERROR_MSG = "sign error"
+
+_salt = None
+_salt_refreshed = False
+
+
+def current_salt() -> str:
+    """The cached salt if one was discovered before, else the built-in."""
+    global _salt
+    if _salt is None:
+        try:
+            with open(SALT_CACHE, encoding="utf-8") as f:
+                _salt = f.read().strip() or SIGN_SALT
+        except OSError:
+            _salt = SIGN_SALT
+    return _salt
+
+
+def remember_salt(salt: str):
+    global _salt
+    _salt = salt
+    try:
+        os.makedirs(os.path.dirname(SALT_CACHE), exist_ok=True)
+        with open(SALT_CACHE, "w", encoding="utf-8") as f:
+            f.write(salt + "\n")
+    except OSError:
+        pass
 
 HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded",
@@ -71,6 +108,10 @@ EX_TEMPFAIL = 75
 class Throttled(Exception):
     """Abandon a run the server is refusing to serve."""
 
+
+class SaltStale(Exception):
+    """The signing salt no longer works and could not be rediscovered."""
+
 # Nothing will change on a later run, so the history file can skip these pairs.
 TERMINAL = {"SUCCESS", "ALREADY_CLAIMED", "EXPIRED", "INVALID_CODE"}
 
@@ -109,6 +150,7 @@ STATUS_GLYPHS = {
     "SKIPPED_NO_KINGDOM": "\u2298",
     "RATE_LIMITED": "\u27f3",
     "NETWORK": "\u26a1",
+    "SIGN_ERROR": "\u26bf",
     "CAPTCHA": "\u26bf",
     "UNKNOWN": "?",
     "SKIPPED_KNOWN": "\u23ed",
@@ -175,16 +217,17 @@ class Reporter:
         print("\nSummary: " + (self.long() or "nothing attempted"))
 
 
-def sign_params(params: dict) -> dict:
+def sign_params(params: dict, salt: str = None) -> dict:
     """Return params plus the md5 signature the API expects."""
     payload = "&".join(f"{k}={params[k]}" for k in sorted(params))
-    signature = hashlib.md5((payload + SIGN_SALT).encode("utf-8")).hexdigest()
+    salt = current_salt() if salt is None else salt
+    signature = hashlib.md5((payload + salt).encode("utf-8")).hexdigest()
     return {**params, "sign": signature}
 
 
-def api_post(path: str, params: dict, timeout: float = 20.0) -> dict:
+def api_post(path: str, params: dict, timeout: float = 20.0, salt: str = None) -> dict:
     """POST a signed request and return the decoded JSON body."""
-    data = urllib.parse.urlencode(sign_params(params)).encode("utf-8")
+    data = urllib.parse.urlencode(sign_params(params, salt)).encode("utf-8")
     request = urllib.request.Request(API_BASE + path, data=data, headers=HEADERS)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -220,6 +263,11 @@ def classify(payload: dict) -> tuple:
     if payload.get("code") == 0:
         status, message = ERR_CODES.get(err_code, ("SUCCESS", raw_msg or "Redeemed"))
         return status, message
+
+    # A rotated salt rejects every single request, so it must not look like a
+    # per-code problem that the run can shrug off and continue past.
+    if raw_msg.lower() == SIGN_ERROR_MSG:
+        return "SIGN_ERROR", "Signature rejected — the site's signing salt changed"
 
     if err_code in ERR_CODES:
         return ERR_CODES[err_code]
@@ -394,6 +442,151 @@ def _history_header(file_path: str):
             return next(csv.reader(f), None)
     except OSError:
         return None
+
+
+def _fetch_text(url: str, timeout: float = 20.0) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": HEADERS["User-Agent"]})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _bundle_sources(timeout: float = 20.0) -> list:
+    """Fetch every JS bundle the page uses, starting from nothing but the URL."""
+    html = _fetch_text(SITE_ROOT, timeout)
+    scripts = [
+        urllib.parse.urljoin(SITE_ROOT, s)
+        for s in re.findall(r'<script[^>]+src="([^"]+)"', html)
+    ]
+    bodies = []
+    app_js = ""
+    app_url = ""
+    for url in scripts:
+        try:
+            body = _fetch_text(url, timeout)
+        except Exception:
+            continue
+        bodies.append(body)
+        if "/app." in url:
+            app_js, app_url = body, url
+
+    # The salt lives in a lazily loaded chunk, which the page only requests once
+    # it renders. Its name is a literal in app.js and its hash is normally the
+    # build hash app.js itself carries; other hashes in app.js are the fallback.
+    if app_js:
+        names = sorted(set(re.findall(r"['\"]([a-zA-Z0-9_]+_vue)['\"]", app_js)))
+        hashes = []
+        m = re.search(r"\.([0-9a-f]{8,})\.js$", app_url)
+        if m:
+            hashes.append(m.group(1))
+        hashes += [h for h in dict.fromkeys(re.findall(r"[0-9a-f]{16}", app_js))
+                   if h not in hashes]
+        base = urllib.parse.urljoin(SITE_ROOT, "js/")
+        for name in names:
+            for digest in hashes[:6]:
+                try:
+                    bodies.append(_fetch_text(f"{base}{name}.{digest}.js", timeout))
+                    break
+                except Exception:
+                    continue
+    return bodies
+
+
+# Strings that pass the shape test but are never a salt.
+_SALT_JUNK = (
+    re.compile(r"^%.*%$"),           # %Int32Array% style intrinsics
+    re.compile(r"^\d+[A-Za-z]+$"),   # obfuscator rotation counters
+    re.compile(r"^[0-9a-f]{16,}$"),  # build hashes
+)
+
+
+def _salt_candidates(bodies: list) -> list:
+    """Opaque short tokens from the bundles, likeliest first."""
+    found = set()
+    for body in bodies:
+        raw = re.findall(r"'((?:[^'\\\n]|\\.)*)'", body)
+        raw += re.findall(r'"((?:[^"\\\n]|\\.)*)"', body)
+        for lit in raw:
+            if "\\" in lit:
+                # Minified sources are full of regex literals, whose \d and \s
+                # are invalid string escapes and warn on decode.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    try:
+                        lit = codecs.decode(lit, "unicode_escape")
+                    except Exception:
+                        continue
+            if not 8 <= len(lit) <= 24:
+                continue
+            if not re.fullmatch(r"[\x21-\x7e]+", lit):
+                continue
+            if re.search(r"[/\\<>(){}\[\]|$;=,]", lit):
+                continue
+            if not (re.search(r"[a-z]", lit) and re.search(r"[A-Z]", lit)
+                    and re.search(r"[0-9]", lit)):
+                continue
+            if any(j.match(lit) for j in _SALT_JUNK):
+                continue
+            found.add(lit)
+    # A salt usually carries a symbol; identifiers and class names never do.
+    return sorted(found, key=lambda s: (not re.search(r"[^A-Za-z0-9]", s), s))
+
+
+def salt_works(salt: str, timeout: float = 15.0) -> bool:
+    """Ask the config endpoint whether this salt signs correctly.
+
+    It takes only a timestamp, touches no player and changes nothing, which
+    makes it the one safe oracle for probing candidates.
+    """
+    payload = api_post("/gift_code_config", {"time": int(time.time())},
+                       timeout=timeout, salt=salt)
+    return payload.get("code") == 0
+
+
+def discover_salt(out: "Reporter" = None, delay: float = 0.4) -> str:
+    """Find the signing salt in the live bundle. Returns None if not found."""
+    out = out or Reporter()
+    try:
+        bodies = _bundle_sources()
+    except Exception as e:
+        out.warn(f"[!] Could not fetch the site bundles: {type(e).__name__}: {e}")
+        return None
+
+    candidates = _salt_candidates(bodies)
+    if not candidates:
+        out.warn("[!] No salt-shaped strings found in the bundles.")
+        return None
+
+    # Diagnostics for an anomaly, and a 9-second silence would be baffling:
+    # stderr, so they stay out of the program's own output and stay ordered.
+    out.warn(f"[i] Probing {len(candidates)} candidate(s) from the live bundle...")
+    for n, candidate in enumerate(candidates, 1):
+        try:
+            if salt_works(candidate):
+                out.warn(f"[i] Salt found on candidate {n}/{len(candidates)}.")
+                return candidate
+        except Exception:
+            pass
+        time.sleep(delay)
+
+    out.warn(f"[!] None of the {len(candidates)} candidates signed correctly.")
+    return None
+
+
+def refresh_salt(out: "Reporter" = None) -> bool:
+    """Rediscover and cache the salt. Runs at most once per process."""
+    global _salt_refreshed
+    out = out or Reporter()
+    if _salt_refreshed:
+        return False
+    _salt_refreshed = True
+
+    out.warn("[!] Signature rejected — looking for the new salt in the site bundle.")
+    found = discover_salt(out)
+    if not found:
+        return False
+    remember_salt(found)
+    out.warn(f"[!] Salt updated to {found!r} (cached in '{SALT_CACHE}').")
+    return True
 
 
 def load_history(file_path: str, out: "Reporter" = None) -> dict:
@@ -584,6 +777,19 @@ def redeem_batch(
                 out.say(f"   ({c_idx}/{len(pending)}) 🎁 '{code}'...", end=" ", flush=True)
 
                 status, message = redeem(fid, kid, code, retries, delay, out)
+
+                # A rejected signature fails every request, so recover once and
+                # retry this same attempt rather than marching on through it.
+                if status == "SIGN_ERROR":
+                    out.say("")
+                    if refresh_salt(out):
+                        status, message = redeem(fid, kid, code, retries, delay, out)
+                    if status == "SIGN_ERROR":
+                        raise SaltStale(
+                            "[!] The site's signing salt changed and could not be "
+                            "recovered automatically. Try 'santaclaus.py --update-salt'."
+                        )
+
                 out.say(f"-> [{status}] ({message})")
 
                 record(name, fid, kid, code, status, message)
@@ -608,6 +814,10 @@ def redeem_batch(
                 time.sleep(delay)
 
         flush_quiet()
+    except SaltStale as e:
+        flush_quiet()
+        out.warn(str(e))
+        exit_code = 1
     except Throttled as e:
         flush_quiet()
         out.warn(str(e))
@@ -647,7 +857,13 @@ if __name__ == "__main__":
         description="Kingshot Santa Claus: Gift Code Redeemer"
     )
 
-    player_group = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument(
+        "--update-salt",
+        action="store_true",
+        help="Find the current signing salt in the live site bundle and cache it",
+    )
+
+    player_group = parser.add_mutually_exclusive_group()
     player_group.add_argument(
         "-u",
         "--userid",
@@ -731,6 +947,21 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    if args.update_salt:
+        reporter = Reporter(args.verbose)
+        if salt_works(current_salt()):
+            reporter.say(f"[i] The current salt still works: {current_salt()!r}")
+            sys.exit(0)
+        found = discover_salt(reporter)
+        if not found:
+            sys.exit(1)
+        remember_salt(found)
+        reporter.say(f"[i] Salt updated to {found!r} (cached in '{SALT_CACHE}').")
+        sys.exit(0)
+
+    if not (args.userid or args.users_file):
+        parser.error("one of the arguments -u/--userid -U/--users-file is required")
 
     if args.userid:
         players = [parse_player(args.userid, args.kid)]
