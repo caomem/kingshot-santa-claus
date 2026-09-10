@@ -15,3 +15,8 @@ Thumbs.db
 *.swp
 *.bak
 *.tmp
+
+# Roster and run output: personal data and generated results
+freemen.csv
+redemption_results.csv
+__pycache__/
