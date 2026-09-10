@@ -69,7 +69,7 @@ session only stops the watching, never the run.
 | `santaclaus` | start a run and stream it |
 | `santaclaus --detach` | start a run and return immediately |
 | `santaclaus --follow` | attach to the run in progress, or replay the last one |
-| `santaclaus --latest` | print the last run that actually changed something |
+| `santaclaus --latest` | print the last run that actually changed something, falling back to the last run |
 
 Extra arguments are passed through and override the defaults, so
 `santaclaus --detach -v verbose` or `santaclaus --force` work as expected.
@@ -92,6 +92,11 @@ Two pointers survive rotation:
 - `logs/latest.log` and `logs/latest.csv` — the last run that **changed
   something**, meaning at least one code came back `SUCCESS` or `PENDING`. Runs
   where everything was already claimed or skipped never take this pointer.
+
+When nothing has been redeemed yet — a fresh install, or a stale pointer whose
+run has been rotated away — `--latest` says so on stderr and shows the last run
+instead of making you retype the command as `--follow`. It only fails when
+there is no run at all.
 
 The run `latest` points at is exempt from rotation, however old it gets. So
 after a week of hourly runs that found nothing new, `santaclaus --latest` still

@@ -180,8 +180,10 @@ if $show_latest; then
             # Pointed at a run that is gone: stale, not merely absent.
             rm -f "$latest" "${latest%.log}.csv"
         fi
-        echo "run.sh: no run has redeemed anything yet (run.sh --follow shows the last run)" >&2
-        exit 1
+        # Nothing has been redeemed yet, so show the last run instead of
+        # sending the caller off to type a second command.
+        echo "run.sh: no run has redeemed anything yet — showing the last run" >&2
+        attach_to_existing
     fi
     echo "[i] last run with changes: ${target#"$repo"/}" >&2
     cat "$target"
