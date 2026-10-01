@@ -112,8 +112,13 @@ class Throttled(Exception):
 class SaltStale(Exception):
     """The signing salt no longer works and could not be rediscovered."""
 
-# Nothing will change on a later run, so the history file can skip these pairs.
-TERMINAL = {"SUCCESS", "ALREADY_CLAIMED", "EXPIRED", "INVALID_CODE"}
+# The history file skips these pairs on later runs. NOT_ELIGIBLE can in theory
+# clear up (Town Center level, account age), but in practice it is asked again
+# and again for nothing; --force retries it when it might have changed.
+TERMINAL = {"SUCCESS", "ALREADY_CLAIMED", "EXPIRED", "INVALID_CODE", "NOT_ELIGIBLE"}
+
+# The player has the rewards. --force still skips these; only --FORCE does not.
+CLAIMED = {"SUCCESS", "ALREADY_CLAIMED"}
 
 # A code that is expired or unknown is expired or unknown for everybody: as soon
 # as one player hits it, stop spending calls on the rest of the roster.
@@ -618,7 +623,11 @@ def load_history(file_path: str, out: "Reporter" = None) -> dict:
             record = dict(zip(HISTORY_FIELDS, row))
             key = (record["player_id"], record["code"])
             status = record["status"]
-            # A terminal status sticks; anything else stays open for a retry.
+            # A claim is never undone by a later attempt (a --FORCE retry of a
+            # redeemed pair can come back as anything). Otherwise a terminal
+            # status sticks and anything else stays open for a retry.
+            if history.get(key) in CLAIMED:
+                continue
             if status in TERMINAL or key not in history:
                 history[key] = status
 
@@ -676,13 +685,16 @@ def redeem_batch(
     retries: int = 3,
     output_csv: str = "redemption_results.csv",
     history_file: str = DEFAULT_HISTORY,
-    ignore_history: bool = False,
+    force: str = None,
     out: "Reporter" = None,
 ):
     out = out or Reporter()
     results = []
     throttled_streak = 0
-    history = {} if ignore_history else load_history(history_file, out)
+    # force=None skips every settled pair, "errors" only the claimed ones, and
+    # "all" ignores the history altogether.
+    history = {} if force == "all" else load_history(history_file, out)
+    skip = CLAIMED if force == "errors" else TERMINAL
     handle, ledger = open_history(history_file, out)
     dead_codes = {}
     exit_code = 0
@@ -755,8 +767,10 @@ def redeem_batch(
             pending, known = [], []
             for code in codes:
                 code = code.strip()
-                previous = dead_codes.get(code) or history.get((fid, code))
-                if previous in TERMINAL:
+                previous = history.get((fid, code))
+                if code in dead_codes:
+                    known.append((code, dead_codes[code]))
+                elif previous in skip:
                     known.append((code, previous))
                 else:
                     pending.append(code)
@@ -918,10 +932,24 @@ if __name__ == "__main__":
         action="store_true",
         help="Do not read or write the history ledger",
     )
-    parser.add_argument(
+    force_group = parser.add_mutually_exclusive_group()
+    force_group.add_argument(
+        "-f",
         "--force",
-        action="store_true",
-        help="Retry pairs the history already settled (still records them)",
+        action="store_const",
+        const="errors",
+        dest="force",
+        help="Retry every pair the history settled without a claim "
+        "(NOT_ELIGIBLE, EXPIRED, ...); still skips SUCCESS/ALREADY_CLAIMED",
+    )
+    force_group.add_argument(
+        "-F",
+        "--FORCE",
+        action="store_const",
+        const="all",
+        dest="force",
+        help="Ignore the history and retry everything, claims included "
+        "(still records them)",
     )
     parser.add_argument(
         "-k",
@@ -994,6 +1022,6 @@ if __name__ == "__main__":
         retries=args.retries,
         output_csv=args.out,
         history_file=None if args.no_history else args.history,
-        ignore_history=args.force,
+        force=args.force,
         out=out,
     ))

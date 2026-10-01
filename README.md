@@ -144,10 +144,22 @@ Every attempt is appended to `logs/history.csv` (`--history` to move it,
 per row so an interrupted run keeps what it did.
 
 On the next run a `(player, code)` pair is skipped when it already settled as
-`SUCCESS`, `ALREADY_CLAIMED`, `EXPIRED` or `INVALID_CODE`. Everything else
-stays open: `NOT_ELIGIBLE` depends on Town Center level and account age,
-`PLAYER_ERROR` usually means a wrong kingdom you will want to fix and retry.
-Use `--force` to attempt everything regardless.
+`SUCCESS`, `ALREADY_CLAIMED`, `EXPIRED`, `INVALID_CODE` or `NOT_ELIGIBLE`.
+Everything else stays open: `PLAYER_ERROR` usually means a wrong kingdom you
+will want to fix and retry.
+
+`NOT_ELIGIBLE` depends on Town Center level and account age, so it can clear
+up eventually — but retrying it on every run mostly just collects the same
+rejection again. Two flags reopen the history:
+
+| Flag | Retries |
+| --- | --- |
+| `-f`, `--force` | every pair that was not claimed (`NOT_ELIGIBLE`, `EXPIRED`, `INVALID_CODE`, ...) — e.g. after a player levels up |
+| `-F`, `--FORCE` | everything, `SUCCESS` and `ALREADY_CLAIMED` included |
+
+Once a pair is claimed it stays claimed in the history, whatever a later
+`--FORCE` retry answers. Through `run.sh`, spell `--force` out: there `-f` is
+`--follow`.
 
 Within a single run, a code that comes back `EXPIRED` or `INVALID_CODE` is
 dropped for the remaining players — it is dead for everyone, so there is no
