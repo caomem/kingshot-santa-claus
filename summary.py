@@ -10,6 +10,7 @@ import csv
 import glob
 import os
 import re
+import signal
 import sys
 import unicodedata
 
@@ -183,7 +184,12 @@ def load_roster(path: str) -> dict:
 
 def load_rows(path: str, roster: dict) -> list:
     with open(path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        missing = {"player_id", "code", "status"} - set(reader.fieldnames or [])
+        if missing:
+            raise SystemExit(f"summary: '{path}' has no {', '.join(sorted(missing))} "
+                             "column — not a results CSV or history ledger")
+        rows = list(reader)
     for row in rows:
         known = roster.get(row.get("player_id"), {})
         name = row.get("player_name") or ""
@@ -279,6 +285,10 @@ def table(lines: list, paint: Painter) -> list:
 
 
 def main(argv=None) -> int:
+    # A report gets piped into head and less: stop quietly when they close.
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
     parser = argparse.ArgumentParser(
         prog="santaclaus summary",
         description="Readable report of a redemption run, one table per kingdom, "
@@ -287,11 +297,12 @@ def main(argv=None) -> int:
     parser.add_argument(
         "-l",
         "--last",
-        metavar="N|A:B|FILE",
+        metavar="N|A:B|all|FILE",
         help="-1 is the last run that attempted anything, -2 the one before, … "
-        "A range joins several: 0:-4 (or -1:-4) is the last four. A results "
-        "CSV path also works. Default: the last run that redeemed something "
-        "(what `santaclaus --latest` shows)",
+        "A range joins several: 0:-4 (or -1:-4) is the last four. `all` reads "
+        "the whole history ledger instead. A results CSV path also works. "
+        "Default: the last run that redeemed something (what `santaclaus "
+        "--latest` shows)",
     )
     parser.add_argument(
         "-f",
@@ -329,11 +340,20 @@ def main(argv=None) -> int:
             )
 
     paint = Painter(use_color(args.color))
-    paths = pick_runs(args.logs, args.last)
+    everything = (args.last or "").lower() == "all"
+    if everything:
+        # The ledger has every attempt ever made, but only ids and statuses:
+        # names and alliances come from the roster alone.
+        paths = [os.path.join(args.logs, "history.csv")]
+        if not os.path.exists(paths[0]):
+            raise SystemExit(f"summary: no history ledger at '{paths[0]}'")
+    else:
+        paths = pick_runs(args.logs, args.last)
     roster = load_roster(args.users_file)
     loaded = [load_rows(path, roster) for path in paths]
     attempts = sum(len(rows) for rows in loaded)
     rows = merge(loaded)
+    merged = everything or len(paths) > 1
     shown = [
         r for r in rows
         if category(r["status"]) in wanted
@@ -342,7 +362,13 @@ def main(argv=None) -> int:
 
     players = {r["player_id"] for r in rows}
     codes = {r["code"] for r in rows}
-    if len(paths) == 1:
+    if everything:
+        stamps = [r["timestamp"][:10] for r in loaded[0] if r.get("timestamp")]
+        span = f"  {stamps[0]} → {stamps[-1]}" if stamps else ""
+        print(paint("bold", "All history" + span)
+              + paint("dim", f"  {os.path.basename(paths[0])}, {attempts} attempt(s), "
+                             "newest outcome per player and code"))
+    elif len(paths) == 1:
         title = run_title(paths[0])
         source = os.path.basename(paths[0])
         print(paint("bold", f"Run {title}")
@@ -354,7 +380,7 @@ def main(argv=None) -> int:
         print(paint("bold", f"Runs {start} → {end}")
               + paint("dim", f"  {len(paths)} runs, {attempts} attempt(s), "
                              "newest outcome per player and code"))
-    noun = "attempt(s)" if len(paths) == 1 else "outcome(s)"
+    noun = "outcome(s)" if merged else "attempt(s)"
     print(f"{len(players)} player(s) · {len(codes)} code(s) · {len(rows)} {noun}")
     if rows:
         print(tally(rows, paint))

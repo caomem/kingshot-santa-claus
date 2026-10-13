@@ -167,6 +167,7 @@ Kingdom 2279  2 player(s)  ∅ 1 not_eligible  ✔ 7 success
 | --- | --- |
 | *(none)* | the last run that redeemed something — the same run `santaclaus --latest` shows |
 | `-l -1`, `-l -2`, … | the last run that attempted anything, the one before, … (`-l FILE` reads any results CSV) |
+| `-l all` | the whole history ledger, `logs/history.csv`: every player and code ever tried, newest outcome each. The ledger keeps no names, alliances or error messages, so names and alliances come from `freemen.csv` and players no longer on it show as `N/A` |
 | `-l 0:-4`, `-l -1:-3` | several runs in one report: `0:-4` is the last four, `-1:-3` the last three. Each player and code shows its newest outcome, so an error a later run fixed drops out |
 | `-f LETTERS` | only some outcomes: `e` errors (anything not claimed — what `--force` would retry), `s` successes (`SUCCESS`, `PENDING`), `a` already claimed. `-f es` hides the already-claimed noise |
 | `-k ID` | only this kingdom; repeatable |
