@@ -17,8 +17,10 @@
 
 set -euo pipefail
 
-# How many runs to keep on disk. Older ones are deleted after every run, except
-# the one --latest points at, which is kept however old it gets.
+# How many runs to keep on disk, counted separately for runs that attempted
+# something (they leave a results CSV) and runs that found nothing to do. Older
+# ones are deleted after every run, except the one --latest points at, which is
+# kept however old it gets.
 keep_runs=${SANTACLAUS_KEEP_RUNS:-10}
 
 # --- locate the repo, following symlinks --------------------------------
@@ -71,20 +73,30 @@ sys.exit(0 if hit else 1)
 PY
 }
 
-# Circular buffer: keep the newest $keep_runs runs, plus whatever --latest
-# points at, and delete every artifact of the rest.
+# Circular buffers: keep the newest $keep_runs runs with results and the newest
+# $keep_runs without, plus whatever --latest points at, and delete every
+# artifact of the rest. One shared buffer let cron's every-ten-minutes no-op runs
+# push the runs worth reading off disk within two hours.
 rotate_runs() {
-    local keep_name="" name
+    local keep_name="" name old
+    local -a with_results=() without=()
     if [ -L "$latest" ]; then
         keep_name=$(basename "$(readlink "$latest")")
     fi
 
-    ls -1 "$log_dir"/run-*.log 2>/dev/null | sort -r | tail -n +$((keep_runs + 1)) |
-        while IFS= read -r old; do
-            name=$(basename "$old")
-            [ "$name" = "$keep_name" ] && continue
-            rm -f "$old" "$old.status" "${old%.log}.csv"
-        done
+    while IFS= read -r old; do
+        if [ -s "${old%.log}.csv" ]; then
+            with_results+=("$old")
+        else
+            without+=("$old")
+        fi
+    done < <(ls -1 "$log_dir"/run-*.log 2>/dev/null | sort -r)
+
+    for old in "${with_results[@]:keep_runs}" "${without[@]:keep_runs}"; do
+        name=$(basename "$old")
+        [ "$name" = "$keep_name" ] && continue
+        rm -f "$old" "$old.status" "${old%.log}.csv"
+    done
     return 0
 }
 

@@ -89,8 +89,11 @@ chains and cron still see failures.
 
 ### Kept logs
 
-Runs are a circular buffer: the newest `SANTACLAUS_KEEP_RUNS` (default 10) are
-kept and everything older is deleted, log and CSV together.
+Runs are kept in two circular buffers: the newest `SANTACLAUS_KEEP_RUNS`
+(default 10) runs that attempted something, and as many again of the runs that
+found nothing to do. Everything older is deleted, log and CSV together. The
+no-op runs cron fires every few minutes rotate among themselves, so they never
+push a run with results — what `santaclaus summary -l` reads — off the disk.
 
 Two pointers survive rotation:
 
@@ -169,7 +172,8 @@ Kingdom 2279  2 player(s)  ∅ 1 not_eligible  ✔ 7 success
 | `-k ID` | only this kingdom; repeatable |
 
 Only runs that attempted something leave a results CSV, so `-l` counts those
-and skips the cron runs where everything was already settled. Names and
+and skips the cron runs where everything was already settled. The last
+`SANTACLAUS_KEEP_RUNS` (default 10) of them are kept. Names and
 alliances come from the run itself, filled in from `freemen.csv` for runs
 written before the alliance column existed.
 
