@@ -18,5 +18,6 @@ Thumbs.db
 
 # Roster and run output: personal data and generated results
 freemen.csv
+renames.csv
 redemption_results.csv
 __pycache__/

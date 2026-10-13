@@ -317,15 +317,21 @@ def redeem(fid: str, kid: str, cdk: str, retries: int, backoff: float, out: "Rep
 
 
 def parse_player(raw: str, default_kid) -> dict:
-    """Parse 'ID', 'Name,ID' or 'Name,ID,KingdomID' into a player dict."""
+    """Parse 'ID', 'Name,ID', 'Name,ID,Kingdom' or 'Name,ID,Kingdom,Alliance'.
+
+    An empty kingdom ('Name,ID,,Alliance') falls back to default_kid.
+    """
     parts = [p.strip() for p in raw.split(",")]
+    alliance = ""
     if len(parts) == 1:
         name, player_id, kid = "N/A", parts[0], default_kid
     elif len(parts) == 2:
         name, player_id, kid = parts[0], parts[1], default_kid
     else:
         name, player_id, kid = parts[0], parts[1], parts[2] or default_kid
-    return {"name": name, "id": player_id, "kid": kid}
+        if len(parts) > 3:
+            alliance = parts[3]
+    return {"name": name, "id": player_id, "kid": kid, "alliance": alliance}
 
 
 def load_players_from_file(file_path: str, default_kid) -> list:
@@ -707,13 +713,14 @@ def redeem_batch(
         out.say(f"  History:       {len(history)} attempt(s) in '{history_file}'")
     out.say("==================================================\n")
 
-    def record(name, fid, kid, code, status, message):
+    def record(name, fid, kid, alliance, code, status, message):
         results.append(
             {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "player_name": name,
                 "player_id": fid,
                 "kingdom_id": kid,
+                "alliance": alliance,
                 "code": code,
                 "status": status,
                 "message": message,
@@ -753,13 +760,14 @@ def redeem_batch(
     try:
         for p_idx, player in enumerate(players, 1):
             name, fid, kid = player["name"], player["id"], player["kid"]
+            alliance = player.get("alliance", "")
 
             if not kid:
                 flush_quiet()
                 out.say(f"\n[{p_idx}/{len(players)}] 👤 '{name}' (ID: {fid}, Kingdom: {kid})")
                 out.say("   [!] Skipped: no kingdom set. Use --kid or a 'Name,ID,Kingdom' line.")
                 for code in codes:
-                    record(name, fid, "", code, "SKIPPED_NO_KINGDOM",
+                    record(name, fid, "", alliance, code, "SKIPPED_NO_KINGDOM",
                            "Kingdom ID is required by the gift code API")
                 continue
 
@@ -806,7 +814,7 @@ def redeem_batch(
 
                 out.say(f"-> [{status}] ({message})")
 
-                record(name, fid, kid, code, status, message)
+                record(name, fid, kid, alliance, code, status, message)
 
                 # Retries were already exhausted, so this is the server still
                 # saying no. A few in a row means the run is pointless.
@@ -853,6 +861,7 @@ def redeem_batch(
                     "player_name",
                     "player_id",
                     "kingdom_id",
+                    "alliance",
                     "code",
                     "status",
                     "message",
@@ -867,6 +876,11 @@ def redeem_batch(
 
 
 if __name__ == "__main__":
+    # A report, not a run: it has its own flags, so hand it off before parsing.
+    if sys.argv[1:2] == ["summary"]:
+        import summary
+        sys.exit(summary.main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(
         description="Kingshot Santa Claus: Gift Code Redeemer"
     )
@@ -886,7 +900,8 @@ if __name__ == "__main__":
     player_group.add_argument(
         "-U",
         "--users-file",
-        help="Path to file with 'ID', 'Name,ID' or 'Name,ID,Kingdom' per line",
+        help="Path to file with 'ID', 'Name,ID', 'Name,ID,Kingdom' or "
+        "'Name,ID,Kingdom,Alliance' per line",
     )
 
     code_group = parser.add_mutually_exclusive_group()

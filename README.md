@@ -46,8 +46,14 @@ python santaclaus.py -U freemen.csv --kid 415 -c CODE1 CODE2
 python santaclaus.py -U freemen.csv --kid 415 -C codes.txt
 ```
 
-Player file accepts `ID`, `Name,ID` or `Name,ID,Kingdom` per line. A per-line
-kingdom overrides `--kid`; a player with neither is skipped.
+Player file accepts `ID`, `Name,ID`, `Name,ID,Kingdom` or
+`Name,ID,Kingdom,Alliance` per line, and the forms mix freely in one file. A
+per-line kingdom overrides `--kid`; leave it empty (`Name,ID,,Alliance`) to
+keep the default. A player with neither is skipped. The alliance goes into the
+run's results CSV for `santaclaus summary`; it is not needed to redeem.
+
+Always lead with the name when a line carries a kingdom: `ID,Kingdom` reads
+as a name and an ID.
 
 ## run.sh
 
@@ -70,6 +76,7 @@ session only stops the watching, never the run.
 | `santaclaus --detach` | start a run and return immediately |
 | `santaclaus --follow` | attach to the run in progress, or replay the last one |
 | `santaclaus --latest` | print the last run that actually changed something, falling back to the last run |
+| `santaclaus summary` | tabulate a run by kingdom, errors first — see [Summary](#summary) |
 
 Extra arguments are passed through and override the defaults, so
 `santaclaus --detach -v verbose` or `santaclaus --force` work as expected.
@@ -136,6 +143,35 @@ python santaclaus.py -U freemen.csv --kid 2279 --auto \
 If the wiki ever stops yielding codes, the run prints
 `returned no codes — its layout may have changed` rather than failing quietly;
 the selector to fix is `HTML_CODE_RE` in `santaclaus.py`.
+
+## Summary
+
+`santaclaus summary` turns a run's results into one table per kingdom, errors
+first, coloured on a terminal (plain when piped or with `NO_COLOR` set):
+
+```
+Run 2026-10-12 20:50  run-20261012-205000.csv
+6 player(s) · 4 code(s) · 24 attempt(s)
+∅ 1 not_eligible  ✔ 15 success  ✓ 8 already_claimed
+
+Kingdom 2279  2 player(s)  ∅ 1 not_eligible  ✔ 7 success
+  STATUS          PLAYER  ALLIANCE  ID         CODES        DETAIL
+  ∅ NOT_ELIGIBLE  Gigi    Freemen   430064733  Hangul2026   Insufficient Town Center Level. Unable to claim.
+  ✔ SUCCESS       Gigi    Freemen   430064733  CHALLENGE26, Kingshot888, VIP777
+```
+
+| Option | Does |
+| --- | --- |
+| *(none)* | the last run that redeemed something — the same run `santaclaus --latest` shows |
+| `-l -1`, `-l -2`, … | the last run that attempted anything, the one before, … (`-l FILE` reads any results CSV) |
+| `-l 0:-4`, `-l -1:-3` | several runs in one report: `0:-4` is the last four, `-1:-3` the last three. Each player and code shows its newest outcome, so an error a later run fixed drops out |
+| `-f LETTERS` | only some outcomes: `e` errors (anything not claimed — what `--force` would retry), `s` successes (`SUCCESS`, `PENDING`), `a` already claimed. `-f es` hides the already-claimed noise |
+| `-k ID` | only this kingdom; repeatable |
+
+Only runs that attempted something leave a results CSV, so `-l` counts those
+and skips the cron runs where everything was already settled. Names and
+alliances come from the run itself, filled in from `freemen.csv` for runs
+written before the alliance column existed.
 
 ## History
 

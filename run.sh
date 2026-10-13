@@ -10,6 +10,7 @@
 #   run.sh --detach     start a run and return immediately
 #   run.sh --follow     attach to the run in progress (or replay the last one)
 #   run.sh --latest     print the last run that actually changed something
+#   run.sh summary      tabulate a run by kingdom, errors first (summary --help)
 #
 # Any other argument is passed through to santaclaus.py and overrides the
 # defaults below, e.g. `run.sh --detach -v verbose` or `run.sh --force`.
@@ -41,6 +42,14 @@ if [ ! -x "$python" ]; then
 fi
 
 log_dir=$repo/logs
+
+# `summary` is a report with flags of its own (-f, -l), so it must not reach
+# the argument loop below, where those mean --follow and --latest.
+if [ "${1:-}" = summary ]; then
+    shift
+    exec "$python" "$repo/santaclaus.py" summary --logs "$log_dir" -U "$repo/freemen.csv" "$@"
+fi
+
 mkdir -p "$log_dir"
 lock_file=$log_dir/.run.lock
 pid_file=$log_dir/.run.pid
